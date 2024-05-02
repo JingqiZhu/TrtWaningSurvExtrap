@@ -1,0 +1,620 @@
+---
+title: 'Blending hazard method for modelling treatment effect waning on survival extrapolation in HTA'
+author: "Jingqi Zhu | Department of Statistical Science | University College London| [jingqi.zhu.22@ucl.ac.uk](mailto:jingqi.zhu.22@ucl.ac.uk)"
+# date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+fig_caption: yes
+link-citations: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(output.dir = ".")
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, autodep = TRUE)
+```
+
+# Load required R packages
+- `muhaz` for estimating non-parametric smoothed hazard from internal RCT data
+- `survHE` for fitting both internal and external survival models
+- `survminer` for drawing survival curves using ggplot2
+- `landest` for estimating survival from Kaplan-Meier
+- `pracma` for calculating area under survival curves via trapezoidal integration
+```{r}
+library(muhaz)
+library(survHE)
+library(survminer)
+library(landest)
+library(pracma)
+# library(scales)
+# library(ggpubr) # combine multiple ggplots to one figure
+```
+
+# Load datasets
+```{r}
+load('./data.Rdata')
+```
+
+# Data description
+
+```{r observed KM plot}
+OS.obs <- rbind(OS.Pem, OS.Ipi)
+km_OS_obs <- survfit(Surv(Time, Event)~Treatment, data=OS.obs)
+
+ggsurvplot(km_OS_obs, censor.shape="", surv.scale="percent", xlab="Time (months)", ylab="Overall Survival", legend.title="Treatment", legend.labs=c('Ipilimumab','Pembrolizumab'))$plot + 
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.85)) + 
+  labs(title="Internal data - Observed KN006 RCT")
+```
+
+```{r external KM plot}
+km_OS_Scha <- survfit(Surv(Time, Event)~Treatment, data=OS.Scha)
+
+ggsurvplot(km_OS_Scha, censor.shape="", conf.int=FALSE, surv.scale="percent", legend="none", xlab="Time (months)", ylab="Overall Survival")$plot + 
+  labs(title="External data - Schadendorf (2015) study")
+```
+
+# 1 Internal model selection
+
+## 1.1 Pembrolizumab arm
+```{r nonparametric smoothed hazard}
+haz_OS_Pem <- muhaz(OS.Pem$Time, OS.Pem$Event, bw.smooth=3)
+plot(haz_OS_Pem, xlab='Time (months)', main='KN006 OS Pembrolizumab arm smoothed hazard')
+```
+
+### 1.1.1 Standard parametric models
+```{r standard parametric models}
+formula <- Surv(Time,Event)~1
+mods <- c("exp","weibull","gompertz","gamma","gengamma","loglogistic","lognormal")
+m_param_OS_Pem <- fit.models(formula=formula, data=OS.Pem, distr=mods)
+```
+
+```{r}
+AIC(m_param_OS_Pem$models$`Gen. Gamma`)
+AIC(m_param_OS_Pem$models$`log-Logistic`)
+AIC(m_param_OS_Pem$models$`log-Normal`)
+BIC(m_param_OS_Pem$models$`Gen. Gamma`)
+BIC(m_param_OS_Pem$models$`log-Logistic`)
+BIC(m_param_OS_Pem$models$`log-Normal`)
+```
+
+```{r fitted hazard}
+# Fitted hazard
+haz_OS_Pem_gengamma <- as.data.frame(summary(m_param_OS_Pem$models$`Gen. Gamma`, type="hazard"))
+haz_OS_Pem_loglogistic <- as.data.frame(summary(m_param_OS_Pem$models$`log-Logistic`, type="hazard"))
+haz_OS_Pem_lognormal <- as.data.frame(summary(m_param_OS_Pem$models$`log-Normal`, type="hazard"))
+
+# Plotting fitted hazard vs smoothed hazard
+hp_OS_Pem_gengamma <- ggplot() + 
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_gengamma$time, haz_OS_Pem_gengamma$est, color='Gen Gamma')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Pem_gengamma,alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Gen Gamma"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Pem_loglogistic <- ggplot() + 
+  geom_line(aes(haz_OS_Pem$est.grid, haz_OS_Pem$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_loglogistic$time, haz_OS_Pem_loglogistic$est, color='Loglogistic')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Pem_loglogistic, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Loglogistic"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Pem_lognormal <- ggplot() + 
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_lognormal$time, haz_OS_Pem_lognormal$est, color='Lognormal')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_lognormal, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Lognormal"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Pem_param <- ggarrange(hp_OS_Pem_gengamma, hp_OS_Pem_loglogistic, hp_OS_Pem_lognormal, nrow=1)
+annotate_figure(hp_OS_Pem_param, top=text_grob("OS Pembrolizumab - Hazard of Standard Parametric Models", color="red", face="bold", size=14))
+```
+
+
+### 1.1.2 Cubic spline models
+**1-knot spline models**
+```{r}
+# 1-knot spline models
+m_spline_hazard_1_OS_Pem <- flexsurvspline(formula=formula, data=OS.Pem, scale="hazard", k=1)
+m_spline_odds_1_OS_Pem <- flexsurvspline(formula=formula, data=OS.Pem, scale="odds", k=1)
+# m_spline_normal_1_OS_Pem <- flexsurvspline(formula=formula,data=OS.Pem,scale="normal", k=1)
+```
+
+```{r Pem 1-knot spline AIC/BIC}
+AIC(m_spline_hazard_1_OS_Pem)
+AIC(m_spline_odds_1_OS_Pem)
+BIC(m_spline_hazard_1_OS_Pem)
+BIC(m_spline_odds_1_OS_Pem)
+```
+
+```{r 1-knot spline hazard}
+haz_OS_Pem_spline_hazard_1 <- data.frame(summary(m_spline_hazard_1_OS_Pem, type="hazard"))
+haz_OS_Pem_spline_odds_1 <- data.frame(summary(m_spline_odds_1_OS_Pem, type="hazard"))
+
+hp_OS_Pem_spline_hazard_1 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_hazard_1$time, haz_OS_Pem_spline_hazard_1$est, color='Spline hazard')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Pem_spline_hazard_1, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D","Spline hazard"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Pem_spline_odds_1 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_odds_1$time, haz_OS_Pem_spline_odds_1$est, color='Spline odds')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Pem_spline_odds_1, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Spline odds"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top', legend.direction="horizontal")
+
+hp_OS_Pem_spline_1 <- ggarrange(hp_OS_Pem_spline_hazard_1, hp_OS_Pem_spline_odds_1, nrow=1)
+annotate_figure(hp_OS_Pem_spline_1, top=text_grob("OS Pembrolizumab - Hazard of 1-Knot Spline Models", color="red", face="bold", size=14))
+```
+
+**2-knot spline models**
+```{r}
+m_spline_hazard_2_OS_Pem <- flexsurvspline(formula=formula, data=OS.Pem, scale="hazard", k=2)
+m_spline_odds_2_OS_Pem <- flexsurvspline(formula=formula, data=OS.Pem, scale="odds", k=2)
+m_spline_normal_2_OS_Pem <- flexsurvspline(formula=formula, data=OS.Pem, scale="normal", k=2)
+```
+
+```{r Pem 2-knot spline AIC/BIC}
+AIC(m_spline_hazard_2_OS_Pem)
+AIC(m_spline_odds_2_OS_Pem)
+AIC(m_spline_normal_2_OS_Pem)
+BIC(m_spline_hazard_2_OS_Pem)
+BIC(m_spline_odds_2_OS_Pem)
+BIC(m_spline_normal_2_OS_Pem)
+```
+
+```{r 2-knot spline fitted hazard}
+haz_OS_Pem_spline_hazard_2 <- data.frame(summary(m_spline_hazard_2_OS_Pem, type="hazard"))
+haz_OS_Pem_spline_odds_2 <- data.frame(summary(m_spline_odds_2_OS_Pem, type="hazard"))
+haz_OS_Pem_spline_normal_2 <- data.frame(summary(m_spline_normal_2_OS_Pem, type="hazard"))
+
+hp_OS_Pem_spline_hazard_2 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_hazard_2$time, haz_OS_Pem_spline_hazard_2$est, color='Spline hazard')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_hazard_2,alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D","Spline hazard"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Pem_spline_odds_2 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_odds_2$time, haz_OS_Pem_spline_odds_2$est, color='Spline odds')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_odds_2,alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Spline odds"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Pem_spline_normal_2 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_normal_2$time, haz_OS_Pem_spline_normal_2$est, color='Spline normal')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_normal_2,alpha=0.1) +
+  scale_colour_manual(name="", values = c("KN 006"="#F8766D", "Spline normal"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Pem_spline_2 <- ggarrange(hp_OS_Pem_spline_hazard_2,hp_OS_Pem_spline_odds_2,hp_OS_Pem_spline_normal_2,nrow=1)
+annotate_figure(hp_OS_Pem_spline_2, top=text_grob("OS Pembrolizumab - Hazard of 2-Knot Spline Models", color="red", face="bold", size=14))
+```
+
+**3-knot spline models**
+```{r}
+m_spline_hazard_3_OS_Pem <- flexsurvspline(formula=formula,data=OS.Pem,scale="hazard",k=3)
+m_spline_odds_3_OS_Pem <- flexsurvspline(formula=formula,data=OS.Pem,scale="odds",k=3)
+m_spline_normal_3_OS_Pem <- flexsurvspline(formula=formula,data=OS.Pem,scale="normal",k=3)
+```
+
+```{r Pem 3-knot spline AIC/BIC}
+AIC(m_spline_hazard_3_OS_Pem)
+AIC(m_spline_odds_3_OS_Pem)
+AIC(m_spline_normal_3_OS_Pem)
+BIC(m_spline_hazard_3_OS_Pem)
+BIC(m_spline_odds_3_OS_Pem)
+BIC(m_spline_normal_3_OS_Pem)
+```
+
+```{r 3-knot spline hazard}
+haz_OS_Pem_spline_hazard_3 <- data.frame(summary(m_spline_hazard_3_OS_Pem, type="hazard"))
+haz_OS_Pem_spline_odds_3 <- data.frame(summary(m_spline_odds_3_OS_Pem, type="hazard"))
+haz_OS_Pem_spline_normal_3 <- data.frame(summary(m_spline_normal_3_OS_Pem, type="hazard"))
+
+hp_OS_Pem_spline_hazard_3 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_hazard_3$time, haz_OS_Pem_spline_hazard_3$est, color='Spline hazard')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_hazard_3,alpha=0.1) +
+  scale_colour_manual(name = "", values = c("KN 006"="#F8766D", "Spline hazard"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction = "horizontal")
+hp_OS_Pem_spline_odds_3 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_odds_3$time, haz_OS_Pem_spline_odds_3$est, color='Spline odds')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_odds_3,alpha=0.1) +
+  scale_colour_manual(name = "", values = c("KN 006"="#F8766D", "Spline odds"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction = "horizontal")
+hp_OS_Pem_spline_normal_3 <- ggplot() +
+  geom_line(aes(haz_OS_Pem$est.grid,haz_OS_Pem$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Pem_spline_normal_3$time, haz_OS_Pem_spline_normal_3$est, color='Spline normal')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Pem_spline_normal_3,alpha=0.1) +
+  scale_colour_manual(name = "", values = c("KN 006"="#F8766D", "Spline normal"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.07) + theme_classic() +
+  theme(legend.position='top',legend.direction = "horizontal")
+hp_OS_Pem_spline_3 <- ggarrange(hp_OS_Pem_spline_hazard_3,hp_OS_Pem_spline_odds_3,hp_OS_Pem_spline_normal_3,nrow=1)
+annotate_figure(hp_OS_Pem_spline_3, top=text_grob("OS Pembrolizumab - Hazard of 3-Knot Spline Models", color="red", face="bold", size=14))
+
+```
+
+## 1.2 Ipilimumab arm
+
+```{r}
+haz_OS_Ipi <- muhaz(OS.Ipi$Time, OS.Ipi$Event, bw.smooth = 3)
+plot(haz_OS_Ipi, xlab='Time (months)', main='KN006 OS Ipilimumab arm smoothed hazard')
+```
+
+### 1.2.1 Standard parametric models
+```{r}
+m_param_OS_Ipi=fit.models(formula=formula, data=OS.Ipi, distr=mods)
+```
+
+```{r}
+AIC(m_param_OS_Ipi$models$`Gen. Gamma`)
+AIC(m_param_OS_Ipi$models$`log-Logistic`)
+AIC(m_param_OS_Ipi$models$`log-Normal`)
+BIC(m_param_OS_Ipi$models$`Gen. Gamma`)
+BIC(m_param_OS_Ipi$models$`log-Logistic`)
+BIC(m_param_OS_Ipi$models$`log-Normal`)
+```
+
+```{r}
+haz_OS_Ipi_gengamma <- as.data.frame(summary(m_param_OS_Ipi$models$`Gen. Gamma`, type="hazard"))
+haz_OS_Ipi_loglogistic <- as.data.frame(summary(m_param_OS_Ipi$models$`log-Logistic`, type="hazard"))
+haz_OS_Ipi_lognormal <- as.data.frame(summary(m_param_OS_Ipi$models$`log-Normal`, type="hazard"))
+
+hp_OS_Ipi_gengamma <- ggplot() + geom_line(aes(haz_OS_Ipi$est.grid,haz_OS_Ipi$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_gengamma$time, haz_OS_Ipi_gengamma$est, color='Gen Gamma')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Ipi_gengamma, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Gen Gamma"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Ipi_loglogistic <- ggplot() + geom_line(aes(haz_OS_Ipi$est.grid,haz_OS_Ipi$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_loglogistic$time, haz_OS_Ipi_loglogistic$est, color='Loglogistic')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl),data=haz_OS_Ipi_loglogistic,alpha=0.1) +
+  scale_colour_manual(name = "", values=c("KN 006"="#F8766D", "Loglogistic"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Ipi_lognormal <- ggplot() + geom_line(aes(haz_OS_Ipi$est.grid,haz_OS_Ipi$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_lognormal$time, haz_OS_Ipi_lognormal$est, color='Lognormal')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Ipi_lognormal, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Lognormal"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Ipi_param <- ggarrange(hp_OS_Ipi_gengamma, hp_OS_Ipi_loglogistic, hp_OS_Ipi_lognormal, nrow=1)
+annotate_figure(hp_OS_Ipi_param, top=text_grob("OS Ipilimumab - Hazard of Standard Parametric Models", color="red", face="bold", size=14))
+```
+
+## 1.2.2 Cubic spline models
+**1-knot spline models**
+```{r}
+m_spline_hazard_1_OS_Ipi <- flexsurvspline(formula=formula, data=OS.Ipi, scale="hazard", k=1)
+m_spline_odds_1_OS_Ipi <- flexsurvspline(formula=formula, data=OS.Ipi, scale="odds", k=1)
+m_spline_normal_1_OS_Ipi <- flexsurvspline(formula=formula, data=OS.Ipi, scale="normal", k=1)
+```
+
+```{r}
+AIC(m_spline_hazard_1_OS_Ipi)
+AIC(m_spline_odds_1_OS_Ipi)
+AIC(m_spline_normal_1_OS_Ipi)
+BIC(m_spline_hazard_1_OS_Ipi)
+BIC(m_spline_odds_1_OS_Ipi)
+BIC(m_spline_normal_1_OS_Ipi)
+```
+
+```{r}
+haz_OS_Ipi_spline_hazard_1 <- data.frame(summary(m_spline_hazard_1_OS_Ipi, type="hazard"))
+haz_OS_Ipi_spline_odds_1 <- data.frame(summary(m_spline_odds_1_OS_Ipi, type="hazard"))
+haz_OS_Ipi_spline_normal_1 <- data.frame(summary(m_spline_normal_1_OS_Ipi, type="hazard"))
+
+hp_OS_Ipi_spline_hazard_1 <- ggplot() +
+  geom_line(aes(haz_OS_Ipi$est.grid, haz_OS_Ipi$haz.est,color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_spline_hazard_1$time, haz_OS_Ipi_spline_hazard_1$est, color='Spline hazard')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Ipi_spline_hazard_1,alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Spline hazard"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard')+ ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Ipi_spline_odds_1 <- ggplot() +
+  geom_line(aes(haz_OS_Ipi$est.grid,haz_OS_Ipi$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_spline_odds_1$time, haz_OS_Ipi_spline_odds_1$est, color='Spline odds')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Ipi_spline_odds_1, alpha=0.1) +
+  scale_colour_manual(name = "", values=c("KN 006"="#F8766D", "Spline odds"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top', legend.direction = "horizontal")
+hp_OS_Ipi_spline_normal_1 <- ggplot() +
+  geom_line(aes(haz_OS_Ipi$est.grid,haz_OS_Ipi$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Ipi_spline_normal_1$time, haz_OS_Ipi_spline_normal_1$est, color='Spline normal')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Ipi_spline_normal_1, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Spline normal"="#00BFC4")) +
+  geom_vline(xintercept=13.85, linetype='dashed') +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Ipi_spline_1 <- ggarrange(hp_OS_Ipi_spline_hazard_1, hp_OS_Ipi_spline_odds_1, hp_OS_Ipi_spline_normal_1, nrow=1)
+annotate_figure(hp_OS_Ipi_spline_1, top=text_grob("OS Ipilimumab - Hazard of 1-Knot Spline Models", color="red", face="bold", size=14))
+```
+
+# 2 External model selection
+
+```{r}
+haz_OS_Scha <- muhaz(OS.Scha$Time, OS.Scha$Event, bw.smooth = 6)
+plot(haz_OS_Scha, xlab='Time (months)', main='Schadendorf (2015) study smoothed hazard')
+```
+**Parametric models rebased at median follow-up of internal trial **
+```{r}
+# Rebase data
+mf <- 13.85 # mf for median follow-up
+OS.Scha.rebased <- subset(OS.Scha, Time>mf)
+OS.Scha.rebased$Time <-  OS.Scha.rebased$Time - mf
+
+# Standard parametric fit to rebased data
+m_rebased_OS_Scha=fit.models(formula=formula, data=OS.Scha.rebased, distr=mods)
+
+AIC(m_rebased_OS_Scha$models$`Weibull`)
+AIC(m_rebased_OS_Scha$models$`Gompertz`)
+AIC(m_rebased_OS_Scha$models$`Gen. Gamma`)
+AIC(m_rebased_OS_Scha$models$`log-Logistic`)
+BIC(m_rebased_OS_Scha$models$`Weibull`)
+BIC(m_rebased_OS_Scha$models$`Gompertz`)
+BIC(m_rebased_OS_Scha$models$`Gen. Gamma`)
+BIC(m_rebased_OS_Scha$models$`log-Logistic`)
+```
+
+```{r}
+haz_OS_Scha_rebased_gomp <- as.data.frame(summary(m_rebased_OS_Scha$models$Gompertz, type="hazard"))
+haz_OS_Scha_rebased_gomp$time <- haz_OS_Scha_rebased_gomp$time + mf
+haz_OS_Scha_rebased_gengamma <- as.data.frame(summary(m_rebased_OS_Scha$models$`Gen. Gamma`, type="hazard"))
+haz_OS_Scha_rebased_gengamma$time <- haz_OS_Scha_rebased_gengamma$time + mf
+haz_OS_Scha_rebased_loglogistic <- as.data.frame(summary(m_rebased_OS_Scha$models$`log-Logistic`, type="hazard"))
+haz_OS_Scha_rebased_loglogistic$time <- haz_OS_Scha_rebased_loglogistic$time + mf
+
+hp_OS_Scha_rebased_gomp <- ggplot() + geom_line(aes(haz_OS_Scha$est.grid,haz_OS_Scha$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Scha_rebased_gomp$time, haz_OS_Scha_rebased_gomp$est, color='Gompertz')) + 
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Scha_rebased_gomp, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Gompertz"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard') + ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Scha_rebased_gengamma <- ggplot() + geom_line(aes(haz_OS_Scha$est.grid,haz_OS_Scha$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Scha_rebased_gengamma$time, haz_OS_Scha_rebased_gengamma$est, color='Gen Gamma')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Scha_rebased_gengamma, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Gen Gamma"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard')+ ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top',legend.direction="horizontal")
+hp_OS_Scha_rebased_loglogistic <- ggplot() +
+  geom_line(aes(haz_OS_Scha$est.grid, haz_OS_Scha$haz.est, color='KN 006')) +
+  geom_line(aes(haz_OS_Scha_rebased_loglogistic$time, haz_OS_Scha_rebased_loglogistic$est, color='Loglogistic')) +
+  geom_ribbon(aes(x=time,y=est,ymin=lcl,ymax=ucl), data=haz_OS_Scha_rebased_loglogistic, alpha=0.1) +
+  scale_colour_manual(name="", values=c("KN 006"="#F8766D", "Loglogistic"="#00BFC4")) +
+  xlab('Time (months)') + ylab('Hazard')+ ylim(0,0.09) + theme_classic() +
+  theme(legend.position='top', legend.direction="horizontal")
+hp_OS_Scha_rebased_param <- ggarrange(hp_OS_Scha_rebased_gomp, hp_OS_Scha_rebased_gengamma, hp_OS_Scha_rebased_loglogistic, nrow=1)
+annotate_figure(hp_OS_Scha_rebased_param, top=text_grob("OS Schadendorf (2015) - Hazard of Rebased Parametric Models", color="red", face="bold", size=14))
+```
+
+# Blending hazard method
+```{r}
+# Set time horizon
+th <- 84 # th for time horizon
+
+# Chosen model for Pembro: 3-knot spline normal
+m_chosen_OS_Pem <- m_spline_normal_3_OS_Pem
+S_chosen_OS_Pem <- data.frame(summary(m_chosen_OS_Pem, t=seq(0,th,0.05)))
+h_chosen_OS_Pem <- data.frame(summary(m_chosen_OS_Pem, type="hazard", t=seq(0,th,0.05)))
+
+# Chosen model for Ipi: Gen Gamma
+m_chosen_OS_Ipi <- m_param_OS_Ipi$models$`Gen. Gamma`
+S_chosen_OS_Ipi <- data.frame(summary(m_chosen_OS_Ipi, t=seq(0,th,0.05)))
+h_chosen_OS_Ipi <- data.frame(summary(m_chosen_OS_Ipi, type="hazard", t=seq(0,th,0.05)))
+
+# Chosen model for Schadendorf(2015): landmark Gompertz
+m_chosen_OS_Scha <- m_rebased_OS_Scha$models$Gompertz
+S_chosen_OS_Scha <- as.data.frame(summary(m_chosen_OS_Scha, t=seq(0-mf,th-mf,0.05)))
+S_chosen_OS_Scha$time <- S_chosen_OS_Scha$time + mf
+S_mf <- surv.km(OS.Scha$Time, OS.Scha$Event, mf)$S.estimate
+S_chosen_OS_Scha[ ,c(2,3,4)] <- S_mf * S_chosen_OS_Scha[ ,c(2,3,4)]
+S_chosen_OS_Scha <- S_chosen_OS_Scha[S_chosen_OS_Scha$time >= 13.85, ]
+h_chosen_OS_Scha <- as.data.frame(summary(m_chosen_OS_Scha, type="hazard", t=seq(0-mf,th-mf,0.05)))
+h_chosen_OS_Scha$time <- h_chosen_OS_Scha$time + mf
+
+# Smoothed hazard of 7-year follow-up data
+haz_OS_Pem_7y <- muhaz(OS.Pem.7y$Time, OS.Pem.7y$Event, bw.smooth=6, max.time=84, n.est.grid=700)
+haz_OS_Ipi_7y <- muhaz(OS.Ipi.7y$Time, OS.Ipi.7y$Event, bw.smooth=6, max.time=84, n.est.grid=700)
+
+# KM of 7-year follow-up data
+km_OS_7y_Pem <- survfit(Surv(Time, Event)~Treatment, data=OS.Pem.7y)
+km_OS_7y_Ipi <- survfit(Surv(Time, Event)~Treatment, data=OS.Ipi.7y)
+
+# Estimated hazard and survival in TA366 base case
+h_comp <- subset(h_chosen_OS_Scha,time>=13.85)$est
+t_comp <- subset(h_chosen_OS_Scha,time>=13.85)$time
+S_mf_Pem <- surv.km(OS.Pem$Time, OS.Pem$Event, mf)$S.estimate
+S_mf_Ipi <- surv.km(OS.Ipi$Time, OS.Ipi$Event, mf)$S.estimate
+S_comp_Pem <- S_mf_Pem * exp(-cumsum(h_comp) * 0.05)
+S_comp_Ipi <- S_mf_Ipi * exp(-cumsum(h_comp) * 0.05)
+```
+
+
+```{r}
+# Plot fitted survival curves of chosen internal and external models
+km_OS_obs_Pem <- survfit(Surv(Time, Event)~Treatment, data=OS.Pem)
+km_OS_obs_Ipi <- survfit(Surv(Time, Event)~Treatment, data=OS.Ipi)
+OS.int.ext <- rbind(OS.Pem, OS.Ipi, OS.Scha)
+km_OS_int_ext <- survfit(Surv(Time, Event)~Treatment, data=OS.int.ext)
+
+ggplot() +
+  geom_line(aes(x=km_OS_obs_Pem$time, y=km_OS_obs_Pem$surv, linetype="Kaplan-Meier"), linewidth=1, color='#00BA38') +
+  geom_line(aes(x=km_OS_obs_Ipi$time, y=km_OS_obs_Ipi$surv, linetype="Kaplan-Meier"), linewidth=1, color='#F8766D') +
+  geom_line(aes(x=km_OS_Scha$time, y=km_OS_Scha$surv, linetype="Kaplan-Meier"), linewidth=1, color='#619CFF') +
+  geom_line(data=S_chosen_OS_Pem,aes(x=time, y=est, linetype="Selected model fit",color='KN006: Pembrolizumab'), linewidth=0.8) + 
+  geom_line(data=S_chosen_OS_Ipi,aes(x=time, y=est, linetype="Selected model fit",color='KN006: Ipilimumab'), linewidth=0.8) +
+  geom_line(data=S_chosen_OS_Scha,aes(x=time, y=est, linetype="Selected model fit",color='Schadendorf'), linewidth=0.8) +
+  scale_linetype_manual(name='Profile', values=c('Selected model fit'='solid', 'Kaplan-Meier'='dashed')) +
+  scale_color_manual(name='Data', values=c('KN006: Pembrolizumab'='#00BA38', 'KN006: Ipilimumab'='#F8766D', 'Schadendorf'='#619CFF')) + 
+  scale_x_continuous(name="Time (months)", breaks=seq(0,84,12), limits=c(0,84)) +
+  scale_y_continuous(name="Overall survival", limits=c(0,1), labels=scales::percent) +
+  theme_classic() +
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.8)) 
+```
+
+```{r}
+blended_model <- function(t1, t2, a, b) {
+## Set blending interval and Beta parameters for each arm
+blending_interval_Pem <- list(min = t1, max = t2)
+beta_params_Pem <- list(alpha = a, beta = b)
+
+blending_interval_Ipi <- list(min = t1, max = t2)
+beta_params_Ipi <- list(alpha = a, beta = b)
+
+wt_par_Pem <- list(a=blending_interval_Pem$min, b=blending_interval_Pem$max,
+                   shape1=beta_params_Pem$alpha, shape2=beta_params_Pem$beta)
+wt_par_Ipi <- list(a=blending_interval_Ipi$min, b=blending_interval_Ipi$max,
+                   shape1=beta_params_Ipi$alpha, shape2=beta_params_Ipi$beta)
+
+## Weight function for each arm
+
+tp <- seq(0,th,0.05)
+weight_Pem <- with(wt_par_Pem,
+                   pbeta((tp - a)/(b - a), shape1, shape2))
+weight_Ipi <- with(wt_par_Ipi,
+                   pbeta((tp - a)/(b - a), shape1, shape2))
+
+# Blend hazards
+h_blendh_Pem <- (1 - weight_Pem) * h_chosen_OS_Pem$est + weight_Pem * h_chosen_OS_Scha$est
+h_blendh_Ipi <- (1 - weight_Ipi) * h_chosen_OS_Ipi$est + weight_Ipi * h_chosen_OS_Scha$est
+h_blendh_Ipi[1] <- 0
+
+# Plot blended hazard for Pembrolizumab
+p1 <- ggplot() +
+  geom_line(aes(haz_OS_Pem_7y$est.grid, haz_OS_Pem_7y$haz.est, colour="Updated data"), linewidth=1, linetype='dashed') +
+  geom_line(aes(tp, h_blendh_Pem, colour="Blended hazard"), linewidth = 1) +
+  geom_line(data=subset(h_chosen_OS_Scha, time>mf), aes(x=time, y=est, colour="TA366 base case"), linewidth=1, linetype='dashed') +
+  geom_vline(xintercept=blending_interval_Pem$min, linetype="dashed", color="grey") +
+  geom_vline(xintercept=blending_interval_Pem$max, linetype="dashed", color="grey") +
+  xlab('Time (months)') + ylab('Hazard') +
+  scale_x_continuous(limits=c(0,th), breaks=seq(0,th,12)) +
+  scale_colour_manual(name="", values=c("Blended hazard"="#F8766D", "Updated data"="black", "TA366 base case"="#619CFF")) +
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.8)) +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank(), panel.background=element_blank(), axis.line=element_line(colour="black"), text=element_text(size=12)) +
+  labs(title=paste('Blending interval (', blending_interval_Pem$min, ',', blending_interval_Pem$max, ')', ', Beta(', beta_params_Ipi$alpha, ',', beta_params_Ipi$beta,')', sep=""), subtitle="Pembrolizumab") 
+
+# Plot blended hazard for Ipilumumab
+p2 <- ggplot() +
+  geom_line(aes(haz_OS_Ipi_7y$est.grid, haz_OS_Ipi_7y$haz.est, colour="Updated data"), linewidth=1, linetype='dashed') +
+  geom_line(aes(tp, h_blendh_Ipi, colour="Blended hazard"), linewidth=1) +
+  geom_line(data=subset(h_chosen_OS_Scha,time>mf), aes(x=time, y=est, colour="TA366 base case"),
+            linewidth=1, linetype="dashed") +
+  geom_vline(xintercept=blending_interval_Ipi$min, linetype="dashed", color="grey") +
+  geom_vline(xintercept=blending_interval_Ipi$max, linetype="dashed", color="grey") +
+  xlab('Time (months)') + ylab('Hazard') +
+  scale_x_continuous(limits=c(0,th), breaks=seq(0,th,12)) +
+  scale_colour_manual(name="", values=c("Blended hazard"="#F8766D", "Updated data"="black", "TA366 base case"="#619CFF")) +
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.8)) +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank(), panel.background=element_blank(), axis.line=element_line(colour="black"), text=element_text(size=12)) +
+  labs(title=paste('Blending interval (', blending_interval_Ipi$min, ',', blending_interval_Ipi$max, ')', ', Beta(', beta_params_Ipi$alpha, ',', beta_params_Ipi$beta,')', sep=""), subtitle="Ipilumumab")
+
+haz_plot <- ggarrange(p1, p2, nrow=1)
+print(haz_plot)
+
+# Blended survival 
+S_blendh_Pem <- exp(-cumsum(h_blendh_Pem) * 0.05)
+S_blendh_Ipi <- exp(-cumsum(h_blendh_Ipi) * 0.05)
+
+# Plot survival curves
+surv_plot <- ggplot() + 
+  geom_line(aes(x=km_OS_7y_Pem$time, y=km_OS_7y_Pem$surv, linetype="Pembrolizumab", color='Updated Kaplan-Meier'), linewidth=1) +
+  geom_line(aes(x=km_OS_7y_Ipi$time, y=km_OS_7y_Ipi$surv, linetype="Ipilimumab", color='Updated Kaplan-Meier'), linewidth=1) +
+  geom_line(data=data.frame(tp,S_blendh_Pem), aes(tp, S_blendh_Pem, color="Blended survival", linetype="Pembrolizumab"), linewidth=1) +
+  geom_line(data=data.frame(tp,S_blendh_Ipi), aes(tp, S_blendh_Ipi, color="Blended survival", linetype="Ipilimumab"), linewidth=1) +
+  geom_line(data=data.frame(t_comp, S_comp_Pem), aes(t_comp,S_comp_Pem, color='TA366 base case', linetype="Pembrolizumab"), linewidth=1) +
+  geom_line(data=data.frame(t_comp, S_comp_Pem), aes(t_comp, S_comp_Ipi, color='TA366 base case', linetype="Ipilimumab"), linewidth=1) +
+  geom_vline(xintercept=blending_interval_Pem$min, linetype="dashed", color="grey") +
+  geom_vline(xintercept=blending_interval_Pem$max, linetype="dashed", color="grey") +
+  scale_x_continuous(name="Time (months)", breaks=seq(0,84,12), limits=c(0,84)) +
+  scale_y_continuous(name="Overall survival", limits=c(0,1), labels=scales::percent) +
+  scale_colour_manual(name="Model", values=c("Blended survival"="#F8766D", "Updated Kaplan-Meier"="black", "TA366 base case"="#619CFF")) +
+  scale_linetype_manual(name="Treatment arm", values=c("Pembrolizumab"="solid", "Ipilimumab"="dashed")) +
+  theme_classic() +
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.8)) +
+  labs(title=paste('Blending interval (', blending_interval_Pem$min, ',', blending_interval_Pem$max, ')', ', Beta(', beta_params_Ipi$alpha, ',', beta_params_Ipi$beta,')', sep=""))
+
+print(surv_plot)
+
+# RMST & incremental RMST of our blended model
+RMST_blendh_Pem <- round(trapz(tp, S_blendh_Pem)/12, 2)
+RMST_blendh_Ipi <- round(trapz(tp, S_blendh_Ipi)/12, 2)
+inc_RMST_blendh <- RMST_blendh_Pem - RMST_blendh_Ipi
+
+print(paste("RMST - Pembrolizumab arm:", RMST_blendh_Pem))
+print(paste("RMST - Ipilimumab arm:", RMST_blendh_Ipi))
+print(paste("Incremental RMST:", inc_RMST_blendh))
+}
+```
+
+```{r}
+t1 <- 24
+t2 <- 60
+a <- 5
+b <- 5
+blended_model(t1,t2,a,b)
+```
+
+# RMST estimates of TA366 base case
+
+```{r}
+# RMST & incremental RMST of TA366 base case
+RMST_comp_Pem <- round(trapz(t_comp, S_comp_Pem) / 12, 2)
+RMST_comp_Ipi <- round(trapz(t_comp, S_comp_Ipi) / 12, 2)
+inc_RMST_comp <- RMST_comp_Pem - RMST_comp_Ipi
+
+print(paste("RMST - Pembrolizumab - TA366 base case:", RMST_comp_Pem))
+print(paste("RMST - Ipilimumab - TA366 base case:", RMST_comp_Ipi))
+print(paste("Incremental RMST - TA366 base case:", inc_RMST_comp))
+```
+
+# RMST estimates of model fit to updated data
+
+```{r}
+# RMST & incremental RMST of Gompertz model fit to updated 7y follow-up data
+m_param_OS_Pem_7y <- fit.models(formula=formula, data=OS.Pem.7y, distr=mods)
+m_param_OS_Ipi_7y <- fit.models(formula=formula, data=OS.Ipi.7y, distr=mods)
+S_gomp_OS_Pem_7y <- as.data.frame(summary(m_param_OS_Pem_7y$models$Gompertz, t=seq(0,th,0.05)))
+S_gomp_OS_Ipi_7y <- as.data.frame(summary(m_param_OS_Ipi_7y$models$Gompertz, t=seq(0,th,0.05)))
+
+ggplot() +
+  geom_line(aes(x=km_OS_7y_Pem$time, y=km_OS_7y_Pem$surv, linetype="Pembrolizumab", color='Updated Kaplan-Meier'), linewidth=1) +
+  geom_line(aes(x=km_OS_7y_Ipi$time, y=km_OS_7y_Ipi$surv, linetype="Ipilimumab", color='Updated Kaplan-Meier'), linewidth=1) +
+  geom_line(data=S_gomp_OS_Pem_7y, aes(x=time, y=est, color="Gompertz model fit", linetype="Pembrolizumab"), linewidth=1) + 
+  geom_line(data=S_gomp_OS_Ipi_7y, aes(x=time, y=est, color="Gompertz model fit", linetype="Ipilimumab"), linewidth=1) +
+  scale_x_continuous(name="Time (months)", breaks=seq(0,84,12), limits=c(0,84)) +
+  scale_y_continuous(name="Overall survival", limits=c(0,1), labels=scales::percent) +
+  scale_colour_manual(name="Model", values=c("Gompertz model fit"="#00BA38", "Updated Kaplan-Meier"="black")) +
+  scale_linetype_manual(name="Treatment arm", values=c("Pembrolizumab"="solid", "Ipilimumab"="dashed")) +
+  theme_classic() +
+  theme(legend.direction="vertical", legend.box="vertical", legend.position=c(0.8,0.8))
+
+RMST_7y_Pem <- round(trapz(S_gomp_OS_Pem_7y$time, S_gomp_OS_Pem_7y$est)/12, 2)
+RMST_7y_Ipi <- round(trapz(S_gomp_OS_Ipi_7y$time, S_gomp_OS_Ipi_7y$est)/12, 2)
+inc_RMST_7y <- RMST_7y_Pem - RMST_7y_Ipi
+
+print(paste("RMST - Pembrolizumab - Gompertz model fit to updated 7-year follow-up data:", RMST_7y_Pem))
+print(paste("RMST - Ipilimumab - Gompertz model fit to updated 7-year follow-up data:", RMST_7y_Ipi))
+print(paste("Incremental RMST - Gompertz model fit to updated 7-year follow-up data:", inc_RMST_7y))
+```
